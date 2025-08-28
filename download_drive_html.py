@@ -1,275 +1,492 @@
+import requests
 import os
+import subprocess
+import csv
 import json
-import sys
-import io
-import random
+import base64
+import shutil
 import time
-import re # 导入正则表达式模块
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+import stat
+from pathlib import Path
+from nacl import encoding, # ----------------# ---------------# -----------------------------
+# Push 文件到仓库（简化版）
+# -----------------------------
+def push_files(token, username, repo_name, files, keywords_path):
+    repo_url = f"https://{username}:{token}@github.com/{username}/{repo_name}.git"
+    tmp_dir = Path(f"./tmp_{repo_name}")
 
-# ------------------------
-# 服务账号配置
-# ------------------------
-service_account_info = os.environ.get("GDRIVE_SERVICE_ACCOUNT")
-if not service_account_info:
-    print("❌ 未找到 GDRIVE_SERVICE_ACCOUNT 环境变量。")
-    sys.exit(1)
+    # 强制清理临时文件夹
+    if tmp_dir.exists():
+        print(f"[INFO] Cleaning up existing temp directory: {tmp_dir}")
+        force_remove_dir(tmp_dir)
+        time.sleep(2)  # 等待文件系统同步
 
-try:
-    service_account_info = json.loads(service_account_info)
-except json.JSONDecodeError:
-    print("❌ 解析 GDRIVE_SERVICE_ACCOUNT 失败。请确保它是一个有效的 JSON 字符串。")
-    sys.exit(1)
-
-SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
-creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
-service = build('drive', 'v3', credentials=creds)
-
-# ------------------------
-# 支持多文件夹 ID
-# ------------------------
-folder_ids_str = os.environ.get("GDRIVE_FOLDER_ID")
-if not folder_ids_str:
-    print("❌ 未找到 GDRIVE_FOLDER_ID 环境变量。")
-    sys.exit(1)
-
-FOLDER_IDS = [fid.strip() for fid in folder_ids_str.split(",") if fid.strip()]
-
-# ------------------------
-# 从 TXT 文件读取关键词
-# ------------------------
-keywords = []
-keywords_file = "keywords.txt"
-if os.path.exists(keywords_file):
-    with open(keywords_file, "r", encoding="utf-8") as f:
-        keywords = [line.strip() for line in f if line.strip()]
-
-if not keywords:
-    print("⚠️ keywords.txt 中没有找到关键词，将使用原始文件名。")
-
-# ------------------------
-# 记录已处理的文件 ID 和文件列表缓存
-# ------------------------
-processed_file_path = "processed_files.json"
-cache_file_path = "files_cache.json"
-CACHE_EXPIRY_HOURS = 24  # 缓存有效期（小时）
-
-try:
-    if os.path.exists(processed_file_path):
-        with open(processed_file_path, "r") as f:
-            processed_data = json.load(f)
-    else:
-        processed_data = {"fileIds": []}
-except (json.JSONDecodeError, IOError) as e:
-    print(f"读取 {processed_file_path} 时出错: {e}。将从一个空的已处理文件列表开始。")
-    processed_data = {"fileIds": []}
-
-def get_cached_files():
-    """从缓存中读取文件列表，如果缓存过期则返回None。"""
-    if os.path.exists(cache_file_path):
-        try:
-            with open(cache_file_path, "r") as f:
-                cache_data = json.load(f)
-                last_updated = cache_data.get("last_updated")
-                if last_updated and (time.time() - last_updated < CACHE_EXPIRY_HOURS * 3600):
-                    print("✅ 缓存未过期，正在从本地加载文件列表。")
-                    return cache_data.get("files", [])
-                else:
-                    print(f"⏳ 缓存已过期（上次更新超过 {CACHE_EXPIRY_HOURS} 小时），将重新拉取文件列表。")
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"读取 {cache_file_path} 时出错: {e}。将重新拉取文件列表。")
-    return None
-
-def save_files_to_cache(files):
-    """将文件列表和当前时间戳保存到缓存文件。"""
-    cache_data = {
-        "last_updated": time.time(),
-        "files": files
-    }
-    with open(cache_file_path, "w") as f:
-        json.dump(cache_data, f, indent=4)
-    print("💾 已将文件列表保存到本地缓存。")
-
-# ------------------------
-# 获取文件列表的函数 (已优化)
-# ------------------------
-def list_files(folder_id):
-    """列出指定 Google Drive 文件夹中的所有文件，支持分页。"""
-    all_the_files = []
-    page_token = None
-    query = f"'{folder_id}' in parents and (" \
-            "mimeType='text/html' or " \
-            "mimeType='text/plain' or " \
-            "mimeType='application/vnd.google-apps.document')"
+    # 创建临时目录
+    tmp_dir.mkdir(exist_ok=True)
+    print(f"[INFO] Created temp directory: {tmp_dir}")
+    
     try:
-        while True:
-            results = service.files().list(
-                q=query,
-                pageSize=1000,
-                fields="nextPageToken, files(id, name, mimeType)",
-                pageToken=page_token
-            ).execute()
-            items = results.get('files', [])
-            all_the_files.extend(items)
-            page_token = results.get('nextPageToken', None)
-            if page_token is None:
-                break
-        print(f"  - 在文件夹 {folder_id} 中总共找到 {len(all_the_files)} 个文件。")
-        return all_the_files
+        # 初始化git仓库
+        subprocess.run(["git", "init"], cwd=str(tmp_dir), check=True)
+        
+        # 创建 .github/workflows 文件夹
+        workflows_dir = tmp_dir / ".github" / "workflows"
+        workflows_dir.mkdir(parents=True, exist_ok=True)Push 文件到仓库（直接上传版）
+# -----------------------------
+def push_files(token, username, repo_name, files, keywords_path):
+    """直接上传指定的文件到仓库，不克隆现有内容"""
+    repo_url = f"https://{username}:{token}@github.com/{username}/{repo_name}.git"
+    tmp_dir = Path(f"./tmp_{repo_name}")
+
+    # 强制清理临时文件夹
+    if tmp_dir.exists():
+        print(f"[INFO] Cleaning up existing temp directory: {tmp_dir}")
+        force_remove_dir(tmp_dir)
+        time.sleep(2)  # 等待文件系统同步
+
+    # 创建临时目录
+    tmp_dir.mkdir(exist_ok=True)
+    print(f"[INFO] Created temp directory: {tmp_dir}")
+
+    try:ush 文件到仓库（直接上传版）
+# -----------------------------
+def push_files(token, username, repo_name, files, keywords_path):
+    repo_url = f"https://{username}:{token}@github.com/{username}/{repo_name}.git"
+    tmp_dir = Path(f"./tmp_{repo_name}")
+
+    # 强制清理临时文件夹
+    if tmp_dir.exists():
+        print(f"[INFO] Cleaning up existing temp directory: {tmp_dir}")
+        force_remove_dir(tmp_dir)
+        time.sleep(2)  # 等待文件系统同步
+
+    # 创建临时目录并初始化git
+    tmp_dir.mkdir(exist_ok=True)
+    print(f"[INFO] Created temp directory: {tmp_dir}")
+
+    try:
+        # 初始化新的git仓库
+        subprocess.run(["git", "init"], cwd=str(tmp_dir), check=True)
+        print("[INFO] Initialized new git repository")-----------------------
+# 固定工作目录到脚本所在目录
+# -----------------------------
+script_dir = Path(__file__).parent.resolve()
+os.chdir(script_dir)
+
+# -----------------------------
+# Helper: 强制删除文件夹（Windows兼容）
+# -----------------------------
+def force_remove_dir(path):
+    """强制删除文件夹，处理Windows权限问题"""
+    if not path.exists():
+        return True
+    
+    def handle_remove_readonly(func, path, exc):
+        """处理只读文件删除"""
+        if os.path.exists(path):
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+    
+    try:
+        shutil.rmtree(path, onerror=handle_remove_readonly)
+        print(f"[INFO] Successfully removed {path}")
+        return True
     except Exception as e:
-        print(f"列出文件时发生错误: {e}")
+        print(f"[WARN] Failed to remove {path}: {e}")
+        # 尝试使用系统命令强制删除
+        try:
+            if os.name == 'nt':  # Windows
+                subprocess.run(['rmdir', '/s', '/q', str(path)], shell=True, check=False)
+            else:  # Unix/Linux
+                subprocess.run(['rm', '-rf', str(path)], check=False)
+            time.sleep(1)  # 等待文件系统同步
+            return True
+        except Exception as e2:
+            print(f"[ERROR] Force remove also failed: {e2}")
+            return False
+
+# -----------------------------
+# Helper: 获取 GitHub 仓库公钥
+# -----------------------------
+def get_public_key(token, username, repo_name):
+    url = f"https://api.github.com/repos/{username}/{repo_name}/actions/secrets/public-key"
+    headers = {"Authorization": f"token {token}"}
+    r = requests.get(url, headers=headers)
+    if r.status_code == 200:
+        return r.json()
+    else:
+        print(f"[ERROR] Failed to get public key for {repo_name}: {r.json()}")
+        return None
+
+# -----------------------------
+# Helper: 加密 Secret
+# -----------------------------
+def encrypt_secret(public_key_str, secret_value):
+    public_key = public.PublicKey(public_key_str.encode("utf-8"), encoding.Base64Encoder())
+    sealed_box = public.SealedBox(public_key)
+    encrypted = sealed_box.encrypt(secret_value.encode("utf-8"))
+    return base64.b64encode(encrypted).decode("utf-8")
+
+# -----------------------------
+# 创建仓库（如果不存在）
+# -----------------------------
+def create_repo(token, username, repo_name):
+    url_check = f"https://api.github.com/repos/{username}/{repo_name}"
+    headers = {"Authorization": f"token {token}"}
+    r = requests.get(url_check, headers=headers)
+    if r.status_code == 200:
+        print(f"[INFO] Repo {repo_name} already exists, skipping creation.")
+        return True
+    url_create = f"https://api.github.com/user/repos"
+    data = {"name": repo_name, "private": False, "auto_init": True}
+    r2 = requests.post(url_create, headers=headers, json=data)
+    if r2.status_code == 201:
+        print(f"[INFO] Repository {repo_name} created successfully.")
+        return True
+    else:
+        print(f"[ERROR] Failed to create {repo_name}: {r2.json()}")
+        return False
+
+# -----------------------------
+# 上传 Secrets
+# -----------------------------
+def set_secret(token, username, repo_name, secret_name, secret_value):
+    if not secret_value:
+        return
+    key_info = get_public_key(token, username, repo_name)
+    if not key_info:
+        return
+    encrypted_value = encrypt_secret(key_info["key"], secret_value)
+    url = f"https://api.github.com/repos/{username}/{repo_name}/actions/secrets/{secret_name}"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+    data = {"encrypted_value": encrypted_value, "key_id": key_info["key_id"]}
+    r = requests.put(url, headers=headers, json=data)
+    if r.status_code in [201, 204]:
+        print(f"[INFO] Secret {secret_name} set for {repo_name}")
+    else:
+        print(f"[ERROR] Failed to set secret {secret_name} for {repo_name}: {r.json()}")
+
+# -----------------------------
+# Git推送重试函数
+# -----------------------------
+def git_push_with_retry(repo_url, max_retries=3, delay=5):
+    """带重试机制的Git推送"""
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"[INFO] Push attempt {attempt}/{max_retries}...")
+            
+            # 先尝试设置Git配置以避免编码问题
+            subprocess.run(["git", "config", "core.quotepath", "false"], check=False)
+            subprocess.run(["git", "config", "i18n.logoutputencoding", "utf-8"], check=False)
+            subprocess.run(["git", "config", "i18n.commitencoding", "utf-8"], check=False)
+            
+            # 推送到GitHub
+            push_result = subprocess.run(
+                ["git", "push", "-u", "origin", "main", "--force"], 
+                capture_output=True, 
+                text=True, 
+                encoding='utf-8',
+                errors='ignore',  # 忽略编码错误
+                timeout=60,  # 60秒超时
+                check=True
+            )
+            
+            print(f"[INFO] Push successful on attempt {attempt}")
+            if push_result.stdout:
+                print(f"[INFO] Push stdout: {push_result.stdout}")
+            if push_result.stderr:
+                print(f"[INFO] Push stderr: {push_result.stderr}")
+            return True
+            
+        except subprocess.TimeoutExpired:
+            print(f"[WARN] Push attempt {attempt} timed out after 60 seconds")
+            if attempt < max_retries:
+                print(f"[INFO] Retrying in {delay} seconds...")
+                time.sleep(delay)
+            continue
+            
+        except subprocess.CalledProcessError as e:
+            print(f"[WARN] Push attempt {attempt} failed with return code {e.returncode}")
+            if hasattr(e, 'stderr') and e.stderr:
+                error_msg = e.stderr.lower()
+                if any(keyword in error_msg for keyword in ['connection', 'network', 'timeout', 'recv failure']):
+                    print(f"[WARN] Network error detected: {e.stderr}")
+                    if attempt < max_retries:
+                        print(f"[INFO] Retrying in {delay} seconds...")
+                        time.sleep(delay)
+                        delay *= 2  # 增加延迟时间
+                        continue
+                else:
+                    print(f"[ERROR] Non-recoverable error: {e.stderr}")
+                    return False
+            
+            if attempt < max_retries:
+                print(f"[INFO] Retrying in {delay} seconds...")
+                time.sleep(delay)
+                delay *= 2
+            continue
+            
+        except Exception as e:
+            print(f"[ERROR] Unexpected error on attempt {attempt}: {e}")
+            if attempt < max_retries:
+                print(f"[INFO] Retrying in {delay} seconds...")
+                time.sleep(delay)
+            continue
+    
+    print(f"[ERROR] All {max_retries} push attempts failed")
+    return False
+
+# -----------------------------
+# Push 文件到仓库（智能更新版）
+# -----------------------------
+def push_files(token, username, repo_name, files, keywords_path):
+    repo_url = f"https://{username}:{token}@github.com/{username}/{repo_name}.git"
+    tmp_dir = Path(f"./tmp_{repo_name}")
+
+    # 强制清理临时文件夹
+    if tmp_dir.exists():
+        print(f"[INFO] Cleaning up existing temp directory: {tmp_dir}")
+        force_remove_dir(tmp_dir)
+        time.sleep(2)  # 等待文件系统同步
+
+    # 创建临时目录
+    tmp_dir.mkdir(exist_ok=True)
+    print(f"[INFO] Created temp directory: {tmp_dir}")
+
+    try:
+        # 克隆现有仓库
+        print(f"[INFO] Cloning existing repository...")
+        clone_result = subprocess.run(
+            ["git", "clone", repo_url, str(tmp_dir)],
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='ignore'
+        )
+        
+        # 如果克隆失败（可能是新仓库），则初始化新的仓库
+        if clone_result.returncode != 0:
+            print(f"[INFO] Repository doesn't exist or is empty, initializing new one...")
+            subprocess.run(["git", "init"], cwd=str(tmp_dir), check=True)
+
+    try:
+        # 创建 .github/workflows 文件夹
+        workflows_dir = tmp_dir / ".github" / "workflows"
+        workflows_dir.mkdir(parents=True, exist_ok=True)
+
+        # 复制文件
+        copied_files = []
+        for f in files:
+            f_path = Path(f)
+            if not f_path.exists():
+                print(f"[WARN] File not found: {f_path}")
+                continue
+            
+            if f_path.name.endswith(".yml") or f_path.name.endswith(".yaml"):
+                dest = workflows_dir / f_path.name
+            else:
+                dest = tmp_dir / f_path.name
+            
+            try:
+                shutil.copy2(f_path, dest)  # 使用copy2保留元数据
+                copied_files.append(str(dest.relative_to(tmp_dir)))
+                print(f"[INFO] Copied {f_path.name} to {dest.relative_to(tmp_dir)}")
+            except Exception as e:
+                print(f"[ERROR] Failed to copy {f_path}: {e}")
+                continue
+
+        # keywords.txt 单独处理
+        keywords_file = tmp_dir / "keywords.txt"
+        if keywords_path and keywords_path.exists():
+            try:
+                shutil.copy2(keywords_path, keywords_file)
+                copied_files.append("keywords.txt")
+                print(f"[INFO] Copied keywords.txt")
+            except Exception as e:
+                print(f"[WARN] Failed to copy keywords.txt: {e}")
+
+        if not copied_files:
+            print(f"[ERROR] No files were copied for {repo_name}")
+            return False
+
+        print(f"[INFO] Total files copied: {len(copied_files)}")
+
+        # 切换到临时目录进行Git操作
+        original_cwd = os.getcwd()
+        os.chdir(tmp_dir)
+
+        try:
+            # Git 初始化和配置
+            print("[INFO] Initializing git repository...")
+            subprocess.run(["git", "init"], capture_output=True, text=True, encoding='utf-8', errors='ignore', check=True)
+            
+            # 设置 Git 配置
+            subprocess.run(["git", "config", "user.name", "Administrator"], check=True)
+            subprocess.run(["git", "config", "user.email", "admin@example.com"], check=True)
+            subprocess.run(["git", "config", "core.autocrlf", "true"], check=False)  # 处理换行符
+            subprocess.run(["git", "config", "core.safecrlf", "false"], check=False)  # 避免换行符警告
+
+            # 检查文件状态（忽略编码错误）
+            try:
+                status_result = subprocess.run(["git", "status", "--porcelain"], 
+                                             capture_output=True, text=True, 
+                                             encoding='utf-8', errors='ignore', check=True)
+                print(f"[INFO] Git status:\n{status_result.stdout}")
+            except:
+                print("[INFO] Git status check completed (with encoding issues)")
+
+            # 添加文件
+            print("[INFO] Adding files to git...")
+            subprocess.run(["git", "add", "."], capture_output=True, text=True, encoding='utf-8', errors='ignore', check=True)
+            
+            # 检查添加后的状态
+            try:
+                status_result = subprocess.run(["git", "status", "--porcelain"], 
+                                             capture_output=True, text=True,
+                                             encoding='utf-8', errors='ignore', check=True)
+                print(f"[INFO] Git status after add:\n{status_result.stdout}")
+            except:
+                print("[INFO] Git status after add completed (with encoding issues)")
+
+            # 提交
+            print("[INFO] Committing changes...")
+            commit_result = subprocess.run(["git", "commit", "-m", "Add workflow and files"], 
+                                         capture_output=True, text=True,
+                                         encoding='utf-8', errors='ignore', check=True)
+            print(f"[INFO] Commit completed")
+
+            # 设置主分支
+            subprocess.run(["git", "branch", "-M", "main"], check=True)
+
+            # 移除可能存在的remote并添加新的
+            subprocess.run(["git", "remote", "remove", "origin"], capture_output=True, check=False)
+            subprocess.run(["git", "remote", "add", "origin", repo_url], check=True)
+
+            # 使用重试机制推送到GitHub
+            print("[INFO] Pushing to GitHub with retry mechanism...")
+            if git_push_with_retry(repo_url):
+                print(f"[INFO] Successfully pushed files to {repo_name}")
+                return True
+            else:
+                print(f"[ERROR] Failed to push files to {repo_name}")
+                return False
+
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] Git command failed: {e}")
+            print(f"[ERROR] Command: {e.cmd}")
+            print(f"[ERROR] Return code: {e.returncode}")
+            if hasattr(e, 'stdout') and e.stdout:
+                print(f"[ERROR] Stdout: {e.stdout}")
+            if hasattr(e, 'stderr') and e.stderr:
+                print(f"[ERROR] Stderr: {e.stderr}")
+            return False
+        finally:
+            # 确保切换回原目录
+            os.chdir(original_cwd)
+
+    except Exception as e:
+        print(f"[ERROR] Exception in push_files: {e}")
+        return False
+    finally:
+        # 清理临时文件夹
+        os.chdir(script_dir)
+        if tmp_dir.exists():
+            print(f"[INFO] Cleaning up temp directory: {tmp_dir}")
+            force_remove_dir(tmp_dir)
+
+# -----------------------------
+# 读取 CSV
+# -----------------------------
+def read_csv(csv_path):
+    try:
+        with open(csv_path, newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            return [row for row in reader]
+    except Exception as e:
+        print(f"[ERROR] Failed to read CSV: {e}")
         return []
 
-# ------------------------
-# 下载和生成 HTML
-# ------------------------
-def download_html_file(file_id, file_name):
-    """下载一个 HTML 文件。"""
-    request = service.files().get_media(fileId=file_id)
-    fh = io.FileIO(file_name, 'wb')
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    print(f"✅ 已下载 {file_name}")
-
-def download_txt_file(file_id, file_name, original_name):
-    """下载一个文本文件并将其转换为 HTML。"""
-    request = service.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    text_content = fh.getvalue().decode('utf-8')
-    html_content = f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{original_name}</title></head><body><pre>{text_content}</pre></body></html>"
-    with open(file_name, 'w', encoding='utf-8') as f:
-        f.write(html_content)
-    print(f"✅ TXT 已转换为 HTML: {file_name}")
-
-def export_google_doc(file_id, file_name):
-    """将 Google 文档导出为 HTML。"""
-    request = service.files().export_media(fileId=file_id, mimeType='text/html')
-    fh = io.FileIO(file_name, 'wb')
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    print(f"✅ Google 文档已导出为 HTML: {file_name}")
-
-# ------------------------
-# 主程序
-# ------------------------
-all_files = get_cached_files()
-
-if all_files is None:
-    all_files = []
-    print("⏳ 正在从 Google Drive 拉取所有文件列表...")
-    for folder_id in FOLDER_IDS:
-        print(f"📂 正在获取文件夹: {folder_id}")
-        files = list_files(folder_id)
-        all_files.extend(files)
-    save_files_to_cache(all_files)
-
-new_files = [f for f in all_files if f['id'] not in processed_data["fileIds"]]
-
-if not new_files:
-    print("✅ 没有新的文件需要处理。")
-    # 即使没有新文件，也需要重新生成内部链接，以防万一
-    print("重新生成所有页面的内部链接...")
-else:
-    print(f"发现 {len(new_files)} 个未处理文件。")
-    num_to_process = min(len(new_files), 30)
-    selected_files = random.sample(new_files, num_to_process)
-    print(f"本次运行将处理 {len(selected_files)} 个文件。")
-
-    available_keywords = list(keywords)
-    keywords_ran_out = False
-
-    for f in selected_files:
-        if available_keywords:
-            keyword = available_keywords.pop(0)
-            safe_name = keyword + ".html"
-        else:
-            if not keywords_ran_out:
-                print("⚠️ 关键词已用完，将使用原始文件名加随机后缀。")
-                keywords_ran_out = True
-            
-            base_name = os.path.splitext(f['name'])[0]
-            sanitized_name = base_name.replace(" ", "-").replace("/", "-")
-            random_suffix = str(random.randint(1000, 9999))
-            safe_name = f"{sanitized_name}-{random_suffix}.html"
-
-        print(f"正在处理 '{f['name']}' -> '{safe_name}'")
-
-        if f['mimeType'] == 'text/html':
-            download_html_file(f['id'], safe_name)
-        elif f['mimeType'] == 'text/plain':
-            download_txt_file(f['id'], safe_name, f['name'])
-        else: # 'application/vnd.google-apps.document'
-            export_google_doc(f['id'], safe_name)
-
-        processed_data["fileIds"].append(f['id'])
-
-    with open(processed_file_path, "w") as f:
-        json.dump(processed_data, f, indent=4)
-    print(f"💾 已将 {len(selected_files)} 个新文件 ID 保存到 {processed_file_path}")
-
-    with open(keywords_file, "w", encoding="utf-8") as f:
-        for keyword in available_keywords:
-            f.write(keyword + "\n")
-    print(f"✅ 已用剩余的关键词更新 {keywords_file}")
-
-# ------------------------
-# 生成累积的站点地图
-# ------------------------
-existing_html_files = [f for f in os.listdir(".") if f.endswith(".html") and f != "index.html"]
-index_content = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Reading Glasses</title></head><body>\n"
-index_content += "<h1>Reading Glasses</h1>\n<ul>\n"
-for fname in sorted(existing_html_files):
-    index_content += f'<li><a href="{fname}">{fname}</a></li>\n'
-index_content += "</ul>\n</body></html>"
-
-with open("index.html", "w", encoding="utf-8") as f:
-    f.write(index_content)
-print("✅ 已生成 index.html (完整站点地图)")
-
-# ------------------------
-# 在每个页面底部添加随机内部链接 (已优化，不会累积)
-# ------------------------
-all_html_files = [f for f in os.listdir(".") if f.endswith(".html") and f != "index.html"]
-
-for fname in all_html_files:
+# -----------------------------
+# 写回 CSV
+# -----------------------------
+def write_csv(csv_path, data, fieldnames):
     try:
-        with open(fname, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-
-        # 使用正则表达式移除所有已有的 footer 链接部分
-        # re.DOTALL 允许 '.' 匹配换行符，re.IGNORECASE 忽略大小写
-        # 正则表达式匹配从 <footer> 到 </footer> 之间的所有内容（非贪婪匹配）
-        content = re.sub(r"<footer>.*?</footer>", "", content, flags=re.DOTALL | re.IGNORECASE)
-        
-        # 从潜在链接列表中排除当前文件
-        other_files = [x for x in all_html_files if x != fname]
-        # 确定要添加的随机链接数量（4 到 6 个之间）
-        num_links = min(len(other_files), random.randint(4, 6))
-
-        if num_links > 0:
-            random_links = random.sample(other_files, num_links)
-            links_html = "<footer><ul>\n" + "\n".join([f'<li><a href="{x}">{x}</a></li>' for x in random_links]) + "\n</ul></footer>"
-            
-            # 找到 </body> 标签之前的位置来插入新的链接
-            if "</body>" in content:
-                content = content.replace("</body>", links_html + "</body>")
-            else:
-                # 如果没有 </body> 标签，就直接附加到文件末尾
-                content += links_html
-
-        with open(fname, "w", encoding="utf-8") as f:
-            f.write(content)
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(data)
     except Exception as e:
-        print(f"无法为 {fname} 处理内部链接: {e}")
+        print(f"[ERROR] Failed to write CSV: {e}")
 
-print("✅ 已为所有页面更新底部随机内部链接 (每个 4-6 个，完全刷新)")
+# -----------------------------
+# 主函数
+# -----------------------------
+if __name__ == "__main__":
+    print("[INFO] Script started")
+    csv_file = Path("github_accounts.csv")
+    accounts = read_csv(csv_file)
+    if not accounts:
+        print("[ERROR] No accounts found, exiting")
+        exit()
+
+    # 检查要上传的文件
+    upload_folder = Path("需要上传的文件")
+    if not upload_folder.exists():
+        print(f"[ERROR] Upload folder not found: {upload_folder}")
+        exit()
+    
+    files_to_upload = list(upload_folder.glob("*"))
+    files_to_upload = [f for f in files_to_upload if f.is_file()]  # 只包含文件，不包含文件夹
+    print(f"[INFO] Found {len(files_to_upload)} files to upload: {[f.name for f in files_to_upload]}")
+
+    if not files_to_upload:
+        print("[WARN] No files found to upload")
+        
+    success_count = 0
+    total_count = len(accounts)
+
+    for i, account in enumerate(accounts, 1):
+        token = account.get("github_token")
+        username = account.get("github_username")
+        keywords_file_name = account.get("keywords_file", "")
+        keywords_file = Path("KEYWORDS_FOLDER") / keywords_file_name if keywords_file_name else None
+
+        if not token or not username:
+            print(f"[ERROR] Missing token or username in CSV: {account}")
+            continue
+
+        repo_name = f"{username}.github.io"
+        print(f"\n[INFO] Processing account {i}/{total_count}: {username} / repo {repo_name}")
+
+        # 创建仓库
+        if not create_repo(token, username, repo_name):
+            continue
+
+        # 设置Secrets
+        set_secret(token, username, repo_name, "GDRIVE_SERVICE_ACCOUNT", account.get("gdrive_service_account", ""))
+        set_secret(token, username, repo_name, "GDRIVE_FOLDER_ID", account.get("gdrive_folder_id", ""))
+
+        # 推送文件
+        if push_files(token, username, repo_name, files_to_upload, keywords_file):
+            success_count += 1
+            # 写回仓库 URL 和 Pages URL
+            account["repo_url"] = f"https://github.com/{username}/{repo_name}"
+            account["pages_url"] = f"https://{username}.github.io"
+            print(f"[INFO] ✓ Successfully processed {username}")
+        else:
+            print(f"[ERROR] ✗ Failed to process {username}")
+            print(f"[INFO] You may need to check your network connection or GitHub access")
+
+        # 添加延迟避免API限制
+        if i < total_count:
+            print("[INFO] Waiting 5 seconds before next account...")
+            time.sleep(5)
+
+    # 写回 CSV
+    if accounts:
+        fieldnames = list(accounts[0].keys())
+        write_csv(csv_file, accounts, fieldnames)
+
+    print(f"\n[INFO] Script finished. Success: {success_count}/{total_count}")
+    if success_count < total_count:
+        print(f"[WARN] {total_count - success_count} accounts failed to process")
